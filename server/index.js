@@ -6,6 +6,7 @@ const csv = require('csv-parser');
 const fs = require('fs');
 const bcrypt = require('bcrypt');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { Configuration, PlaidApi, PlaidEnvironments } = require('plaid'); // Added Plaid
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
@@ -20,11 +21,22 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
+// --- GOOGLE AI SETUP ---
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-// Helper to prevent API rate limiting
 const delay = ms => new Promise(res => setTimeout(res, ms));
+
+// --- PLAID SETUP ---
+const plaidConfig = new Configuration({
+  basePath: PlaidEnvironments.sandbox,
+  baseOptions: {
+    headers: {
+      'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID,
+      'PLAID-SECRET': process.env.PLAID_SECRET,
+    },
+  },
+});
+const plaidClient = new PlaidApi(plaidConfig);
 
 const categorize = (desc) => {
   if (!desc) return 'Other';
@@ -56,7 +68,41 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- AI CLASSIFICATION ROUTE (Single) ---
+// --- PLAID ROUTES ---
+// 1. Generate Link Token for the Frontend
+app.post('/api/create_link_token', async (req, res) => {
+  try {
+    const response = await plaidClient.linkTokenCreate({
+      user: { client_user_id: 'client-id-temp' },
+      client_name: 'Budget Insights',
+      products: ['transactions'],
+      country_codes: ['US'],
+      language: 'en',
+    });
+    res.json(response.data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create link token" });
+  }
+});
+
+// 2. Exchange Public Token and Save Access Token
+app.post('/api/exchange_public_token', async (req, res) => {
+  const { public_token, userId } = req.body;
+  try {
+    const response = await plaidClient.itemPublicTokenExchange({ public_token });
+    const accessToken = response.data.access_token;
+    
+    // Save to database securely
+    await pool.query("UPDATE users SET plaid_access_token = $1 WHERE id = $2", [accessToken, userId]);
+    res.json({ message: "Bank connected successfully!" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to exchange token" });
+  }
+});
+
+// --- AI CLASSIFICATION ROUTE ---
 app.post('/api/classify', async (req, res) => {
   const { description } = req.body;
   try {
@@ -64,7 +110,6 @@ app.post('/api/classify', async (req, res) => {
     const result = await model.generateContent(prompt);
     res.json({ category: result.response.text().trim() });
   } catch (err) {
-    console.error("AI Error:", err);
     res.status(500).json({ error: "AI classification failed" });
   }
 });
@@ -116,18 +161,13 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
         for (const row of results) {
           const amt = row.Amount || row.amount || 0;
           const desc = (row.Description || row.description || 'Unknown').trim();
-          
-          // 1. Try Rule-Based first
           let cat = categorize(desc);
-          
-          // 2. If unknown, ask AI
           if (cat === 'Other') {
-            await delay(1000); // Wait 1 second to respect API limits
+            await delay(1000);
             const prompt = `Classify "${desc}" into: Income, Housing, Food, Transportation, Entertainment, Shopping, Utilities, Other. Return ONLY the category name.`;
             const result = await model.generateContent(prompt);
             cat = result.response.text().trim();
           }
-
           await pool.query("INSERT INTO expenses (amount, description, category, transaction_date, user_id) VALUES ($1, $2, $3, CURRENT_DATE, $4)", [amt, desc, cat, userId]);
         }
         res.send('Bulk upload successful with AI classification!');
@@ -138,7 +178,16 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 
 // Database Setup
 const setupDatabase = async () => {
+  // Creating tables if they don't exist
   await pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL);`);
+  
+  // Adding the Plaid access token column safely (in case the table already exists)
+  try {
+    await pool.query(`ALTER TABLE users ADD COLUMN plaid_access_token VARCHAR(255);`);
+  } catch (err) {
+    // Column already exists, safe to ignore
+  }
+
   await pool.query(`CREATE TABLE IF NOT EXISTS expenses (id SERIAL PRIMARY KEY, amount DECIMAL(10,2) NOT NULL, description VARCHAR(255) NOT NULL, category VARCHAR(50), transaction_date DATE, user_id INTEGER REFERENCES users(id));`);
 };
 
