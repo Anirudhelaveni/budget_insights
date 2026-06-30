@@ -2,9 +2,6 @@ import { useState } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import toast, { Toaster } from 'react-hot-toast';
-const API_URL = "https://budget-backend-ebjy.onrender.com";
-// Then use it like this:
-await axios.get(`${API_URL}/api/expenses?userId=${userId}`);
 
 export default function Login() {
   const [isLogin, setIsLogin] = useState(true);
@@ -17,7 +14,7 @@ export default function Login() {
     const endpoint = isLogin ? '/api/login' : '/api/register';
     
     try {
-      const res = await axios.post(`http://localhost:3000${endpoint}`, { email, password });
+      const res = await axios.post(`https://budget-backend-ebjy.onrender.com${endpoint}`, { email, password });
       
       if (isLogin) {
         localStorage.setItem('userId', res.data.userId);
@@ -25,7 +22,7 @@ export default function Login() {
         navigate('/dashboard');
       } else {
         toast.success("Account created! Please log in.");
-        setIsLogin(true); // Switch back to login view
+        setIsLogin(true);
         setPassword('');
       }
     } catch (err) {
@@ -33,7 +30,6 @@ export default function Login() {
     }
   };
 
-  // --- STYLES ---
   const containerStyle = { 
     display: 'flex', justifyContent: 'center', alignItems: 'center', 
     height: '100vh', background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)', 
@@ -66,7 +62,7 @@ export default function Login() {
         <form onSubmit={handleSubmit}>
           <input type="email" placeholder="Email Address" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} required />
           <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} style={inputStyle} required />
-          <button type="submit" style={btnStyle} onMouseOver={(e) => e.target.style.backgroundColor = '#2563eb'} onMouseOut={(e) => e.target.style.backgroundColor = '#3b82f6'}>
+          <button type="submit" style={btnStyle}>
             {isLogin ? 'Secure Login' : 'Create Account'}
           </button>
         </form>
