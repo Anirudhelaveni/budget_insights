@@ -13,7 +13,6 @@ app.use(cors());
 app.use(express.json());
 
 // STRICT CONFIGURATION (Local + Production)
-// Ensure you replace 'anirudh' with your actual local database password if it changes
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:anirudh@localhost:5433/budget_insights',
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
@@ -60,16 +59,11 @@ app.post('/api/login', async (req, res) => {
 
 // --- EXPENSE ROUTES ---
 
-// 1. GET all expenses (NEW: Filtered by userId)
 app.get('/api/expenses', async (req, res) => {
-  const { userId } = req.query; // Capture the userId sent from the frontend
-  
-  if (!userId) {
-    return res.status(400).json({ error: "User ID is required" });
-  }
+  const { userId } = req.query;
+  if (!userId) return res.status(400).json({ error: "User ID is required" });
 
   try {
-    // Only fetch records where the user_id matches
     const allExpenses = await pool.query(
       "SELECT * FROM expenses WHERE user_id = $1 ORDER BY transaction_date DESC NULLS LAST, id DESC",
       [userId]
@@ -81,10 +75,8 @@ app.get('/api/expenses', async (req, res) => {
   }
 });
 
-// 2. POST manual expense (NEW: Attaches userId to the record)
 app.post('/api/expenses', async (req, res) => {
   const { amount, description, category, userId } = req.body;
-  
   if (!userId) return res.status(400).json({ error: "User ID is required" });
   
   const finalCategory = category || categorize(description); 
@@ -101,11 +93,9 @@ app.post('/api/expenses', async (req, res) => {
   }
 });
 
-// 3. PUT update existing expense (NEW: Ensures the user owns the record they are updating)
 app.put('/api/expenses/:id', async (req, res) => {
   const { id } = req.params;
   const { amount, description, category, userId } = req.body;
-  
   if (!userId) return res.status(400).json({ error: "User ID is required" });
 
   const finalCategory = category || categorize(description); 
@@ -122,11 +112,9 @@ app.put('/api/expenses/:id', async (req, res) => {
   }
 });
 
-// 4. DELETE an expense
 app.delete('/api/expenses/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    // Safely delete by the specific expense ID
     await pool.query("DELETE FROM expenses WHERE id = $1", [id]);
     res.json({ message: "Expense deleted successfully" });
   } catch (err) {
@@ -135,10 +123,8 @@ app.delete('/api/expenses/:id', async (req, res) => {
   }
 });
 
-// 5. POST CSV Upload (NEW: Attaches userId to every uploaded row)
 app.post('/api/upload', upload.single('file'), (req, res) => {
-  const userId = req.body.userId; // Extract userId sent via FormData
-  
+  const userId = req.body.userId;
   if (!userId) return res.status(400).send("User ID is required for upload.");
 
   const results = [];
@@ -151,7 +137,6 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
           const amt = row.Amount || row.amount || 0; 
           const desc = row.Description || row.description || 'Unknown';
           const category = categorize(desc);
-
           await pool.query(
             "INSERT INTO expenses (amount, description, category, transaction_date, user_id) VALUES ($1, $2, $3, CURRENT_DATE, $4)",
             [amt, desc, category, userId]
@@ -166,6 +151,37 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     });
 });
 
-// Deployment-ready Port
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// --- AUTO-SETUP DATABASE TABLES ---
+const setupDatabase = async () => {
+  const createUsersTable = `
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email VARCHAR(255) UNIQUE NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );`;
+
+  const createExpensesTable = `
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      amount DECIMAL(10,2) NOT NULL,
+      description VARCHAR(255) NOT NULL,
+      category VARCHAR(50),
+      transaction_date DATE,
+      user_id INTEGER REFERENCES users(id)
+    );`;
+
+  try {
+    await pool.query(createUsersTable);
+    await pool.query(createExpensesTable);
+    console.log("✅ Database tables verified/created successfully.");
+  } catch (err) {
+    console.error("❌ Database setup error:", err.message);
+  }
+};
+
+// Start Server after DB verification
+setupDatabase().then(() => {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+});
