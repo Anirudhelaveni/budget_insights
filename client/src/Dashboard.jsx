@@ -71,31 +71,32 @@ export default function Dashboard() {
   const API_URL = "https://budget-backend-ebjy.onrender.com";
 
   // --- PLAID INTEGRATION ---
-  const [linkToken, setLinkToken] = useState(null);
+const connectIndianBank = async () => {
+  try {
+    const phone = window.prompt("Enter your phone number registered with your bank:");
+    if (!phone) return;
 
-  useEffect(() => {
-    const fetchLinkToken = async () => {
-      try {
-        const response = await axios.post(`${API_URL}/api/create_link_token`);
-        setLinkToken(response.data.link_token);
-      } catch (err) { 
-        console.error("Plaid Error fetching link token:", err); 
-      }
-    };
-    fetchLinkToken();
-  }, []);
+    const toastId = toast.loading("Generating secure connection...");
+    
+    // 1. Call your backend
+    const response = await axios.post(`${API_URL}/api/setu/create_consent`, { 
+      userPhoneNumber: phone 
+    });
+    
+    toast.dismiss(toastId);
 
-  const { open: openPlaid, ready: plaidReady } = usePlaidLink({
-    token: linkToken,
-    onSuccess: async (public_token) => {
-      try {
-        await axios.post(`${API_URL}/api/exchange_public_token`, { public_token, userId });
-        toast.success("Bank connected successfully!");
-      } catch (err) {
-        toast.error("Failed to connect bank.");
-      }
-    },
-  });
+    // 2. Redirect user to Setu's UI to approve the request via OTP
+    window.location.href = response.data.url;
+
+  } catch (err) {
+    toast.error("Failed to connect to Account Aggregator.");
+  }
+};
+
+// In your JSX:
+<button onClick={connectIndianBank} style={S.btnSecondary}>
+  🏦 Connect Indian Bank
+</button>
 
   // --- API CALLS ---
   const fetchExpenses = async () => {
