@@ -5,27 +5,27 @@ const multer = require('multer');
 const csv = require('csv-parser');
 const fs = require('fs');
 const bcrypt = require('bcrypt');
-const { GoogleGenerativeAI } = require("@google/generative-ai"); // Added AI library
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
 
-// Allow your Vercel frontend URL to talk to this backend
 app.use(cors({
   origin: ["http://localhost:5173", "https://budget-insights-beta.vercel.app"]
 }));
 app.use(express.json());
 
-// STRICT CONFIGURATION
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:anirudh@localhost:5433/budget_insights',
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// AI Configuration
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// Helper: Auto-Categorization (Fallback if AI fails)
+// Helper to prevent API rate limiting
+const delay = ms => new Promise(res => setTimeout(res, ms));
+
 const categorize = (desc) => {
   if (!desc) return 'Other';
   const d = desc.toLowerCase();
@@ -56,11 +56,10 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- AI CLASSIFICATION ROUTE ---
+// --- AI CLASSIFICATION ROUTE (Single) ---
 app.post('/api/classify', async (req, res) => {
   const { description } = req.body;
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     const prompt = `Categorize this transaction description: "${description}" into one of: Income, Housing, Food, Transportation, Entertainment, Shopping, Utilities, Other. Return ONLY the category name.`;
     const result = await model.generateContent(prompt);
     res.json({ category: result.response.text().trim() });
@@ -105,7 +104,7 @@ app.delete('/api/expenses/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// CSV Upload
+// --- AI BATCH CSV UPLOAD ---
 app.post('/api/upload', upload.single('file'), (req, res) => {
   const userId = req.body.userId;
   const results = [];
@@ -116,11 +115,22 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
       try {
         for (const row of results) {
           const amt = row.Amount || row.amount || 0;
-          const desc = row.Description || row.description || 'Unknown';
-          const cat = categorize(desc);
+          const desc = (row.Description || row.description || 'Unknown').trim();
+          
+          // 1. Try Rule-Based first
+          let cat = categorize(desc);
+          
+          // 2. If unknown, ask AI
+          if (cat === 'Other') {
+            await delay(1000); // Wait 1 second to respect API limits
+            const prompt = `Classify "${desc}" into: Income, Housing, Food, Transportation, Entertainment, Shopping, Utilities, Other. Return ONLY the category name.`;
+            const result = await model.generateContent(prompt);
+            cat = result.response.text().trim();
+          }
+
           await pool.query("INSERT INTO expenses (amount, description, category, transaction_date, user_id) VALUES ($1, $2, $3, CURRENT_DATE, $4)", [amt, desc, cat, userId]);
         }
-        res.send('Bulk upload successful!');
+        res.send('Bulk upload successful with AI classification!');
       } catch (err) { res.status(500).send(err.message); }
       finally { fs.unlinkSync(req.file.path); }
     });
