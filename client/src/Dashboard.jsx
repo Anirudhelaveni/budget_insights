@@ -3,6 +3,7 @@ import axios from 'axios';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import toast, { Toaster } from 'react-hot-toast';
+import { usePlaidLink } from 'react-plaid-link';
 
 // --- DESIGN SYSTEM TOKENS ---
 const theme = {
@@ -68,6 +69,33 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const userId = localStorage.getItem('userId');
   const API_URL = "https://budget-backend-ebjy.onrender.com";
+
+  // --- PLAID INTEGRATION ---
+  const [linkToken, setLinkToken] = useState(null);
+
+  useEffect(() => {
+    const fetchLinkToken = async () => {
+      try {
+        const response = await axios.post(`${API_URL}/api/create_link_token`);
+        setLinkToken(response.data.link_token);
+      } catch (err) { 
+        console.error("Plaid Error fetching link token:", err); 
+      }
+    };
+    fetchLinkToken();
+  }, []);
+
+  const { open: openPlaid, ready: plaidReady } = usePlaidLink({
+    token: linkToken,
+    onSuccess: async (public_token) => {
+      try {
+        await axios.post(`${API_URL}/api/exchange_public_token`, { public_token, userId });
+        toast.success("Bank connected successfully!");
+      } catch (err) {
+        toast.error("Failed to connect bank.");
+      }
+    },
+  });
 
   // --- API CALLS ---
   const fetchExpenses = async () => {
@@ -174,8 +202,7 @@ export default function Dashboard() {
     await new Promise(resolve => setTimeout(resolve, 800));
 
     // MOCK AI LOGIC (Replace this block with actual Gemini/OpenAI API call later)
-    /* 
-      const response = await fetch('YOUR_AI_ENDPOINT', {
+    /* const response = await fetch('YOUR_AI_ENDPOINT', {
         method: 'POST',
         body: JSON.stringify({ prompt: `Categorize this transaction: ${description}` })
       });
@@ -523,6 +550,9 @@ export default function Dashboard() {
                         <p style={{ margin: 0, fontSize: '14px', color: theme.textMuted }}>Track and manage your income and expenses.</p>
                       </div>
                       <div style={{ display: 'flex', gap: '12px' }}>
+                        <button onClick={() => openPlaid()} disabled={!plaidReady} style={{ ...S.btnSecondary, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          🏦 Connect Bank
+                        </button>
                         <label style={{ ...S.btnSecondary, display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
                           📥 Import CSV
                           <input type="file" style={{ display: 'none' }} accept=".csv" onChange={handleFileUpload} />
