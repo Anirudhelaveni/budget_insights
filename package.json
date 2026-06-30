@@ -1,0 +1,14 @@
+{
+  "name": "budget_insights",
+  "version": "1.0.0",
+  "description": "Full stack budget app",
+  "main": "index.js",
+  "scripts": {
+    "server": "cd server && node index.js",
+    "client": "cd client && npm run dev",
+    "dev": "concurrently \"npm run server\" \"npm run client\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}
