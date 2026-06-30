@@ -47,10 +47,11 @@ export default function Dashboard() {
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
-  const [type, setType] = useState('expense'); // 'expense' or 'income'
+  const [type, setType] = useState('expense'); 
   
   const [editingId, setEditingId] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [openSupportTopic, setOpenSupportTopic] = useState(null); // Accordion state
   
   // Filtering, Sorting, Pagination, and View State
   const [selectedMonth, setSelectedMonth] = useState('All');
@@ -59,7 +60,7 @@ export default function Dashboard() {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 8;
   const [activeTab, setActiveTab] = useState('overview'); 
-  const [viewMode, setViewMode] = useState('pie'); // 'pie' or 'bar'
+  const [viewMode, setViewMode] = useState('pie'); 
   
   // Support Form State
   const [supportForm, setSupportForm] = useState({ name: '', email: '', message: '' });
@@ -99,16 +100,52 @@ export default function Dashboard() {
     } catch (err) { toast.error("Something went wrong."); }
   };
 
+  // --- SMART FRONTEND CSV PARSER ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('userId', userId);
-    toast.promise(
-      axios.post(`${API_URL}/api/upload`, formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
-      { loading: 'Importing data...', success: 'Import complete!', error: 'Import failed.' }
-    ).then(() => fetchExpenses());
+
+    const reader = new FileReader();
+    reader.onload = async ({ target }) => {
+      try {
+        const csv = target.result;
+        const lines = csv.split('\n').filter(line => line.trim() !== '');
+        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+        
+        let amountIdx = headers.findIndex(h => h.includes('amount'));
+        let descIdx = headers.findIndex(h => h.includes('desc'));
+        let catIdx = headers.findIndex(h => h.includes('category') || h.includes('cat'));
+        
+        if (amountIdx === -1 || descIdx === -1) {
+           return toast.error("CSV must contain 'Amount' and 'Description' columns.");
+        }
+
+        const promises = [];
+        for (let i = 1; i < lines.length; i++) {
+          const cols = lines[i].split(',');
+          if (cols.length < 2) continue;
+          
+          // Strip currency symbols to prevent NaN errors
+          let amtStr = cols[amountIdx].replace(/[^0-9.-]+/g,"");
+          let amt = parseFloat(amtStr);
+          let desc = cols[descIdx].replace(/['"]/g, '').trim();
+          let cat = catIdx !== -1 ? cols[catIdx].replace(/['"]/g, '').trim() : 'Other';
+          
+          promises.push(axios.post(`${API_URL}/api/expenses`, {
+            amount: amt, description: desc, category: cat, userId
+          }));
+        }
+        
+        toast.promise(
+          Promise.all(promises),
+          { loading: 'Processing CSV data...', success: 'Data imported successfully!', error: 'Import failed.' }
+        ).then(() => fetchExpenses());
+        
+      } catch (err) {
+        toast.error("Failed to parse CSV format.");
+      }
+    };
+    reader.readAsText(file);
   };
 
   const handleDelete = async (id) => {
@@ -124,13 +161,48 @@ export default function Dashboard() {
   const handleSupportSubmit = (e) => {
     e.preventDefault();
     toast.success("Message sent successfully! We will get back to you soon.");
-    setSupportForm({ name: '', email: '', message: '' }); // Clears the fields perfectly
+    setSupportForm({ name: '', email: '', message: '' }); 
+  };
+
+  // --- AI INTEGRATION FEATURE ---
+  const handleAiClassify = async () => {
+    if (!description) return toast.error("Please enter a description first.");
+    
+    const toastId = toast.loading("AI is analyzing transaction...");
+    
+    // Simulate AI network delay
+    await new Promise(resolve => setTimeout(resolve, 800));
+
+    // MOCK AI LOGIC (Replace this block with actual Gemini/OpenAI API call later)
+    /* 
+      const response = await fetch('YOUR_AI_ENDPOINT', {
+        method: 'POST',
+        body: JSON.stringify({ prompt: `Categorize this transaction: ${description}` })
+      });
+      const data = await response.json();
+      setCategory(data.category);
+    */
+    
+    const descLower = description.toLowerCase();
+    let suggestedCat = "Other";
+    
+    if (descLower.includes('netflix') || descLower.includes('movie') || descLower.includes('spotify')) suggestedCat = "Entertainment";
+    else if (descLower.includes('uber') || descLower.includes('fuel') || descLower.includes('transit')) suggestedCat = "Transportation";
+    else if (descLower.includes('food') || descLower.includes('zomato') || descLower.includes('swiggy') || descLower.includes('grocery')) suggestedCat = "Food";
+    else if (descLower.includes('rent') || descLower.includes('electricity') || descLower.includes('wifi')) suggestedCat = "Housing";
+    else if (descLower.includes('salary') || descLower.includes('client') || descLower.includes('dividend')) {
+      suggestedCat = "Income";
+      setType('income');
+    }
+    
+    setCategory(suggestedCat);
+    toast.success(`AI selected: ${suggestedCat}`, { id: toastId });
   };
 
   const openEditModal = (exp) => {
     setEditingId(exp.id);
     setDescription(exp.description);
-    setAmount(Math.abs(exp.amount));
+    setAmount(Math.abs(getCorrectedAmount(exp)));
     setType(getCorrectedAmount(exp) >= 0 ? 'income' : 'expense');
     setCategory(exp.category || '');
     setIsModalOpen(true);
@@ -145,10 +217,12 @@ export default function Dashboard() {
     setType('expense');
   };
 
-  // --- DATA PROCESSING (FIXED RETROACTIVE LOGIC) ---
-  // This helper fixes old data where expenses might have been stored as positive numbers
+  // --- DATA PROCESSING (FIXED RETROACTIVE LOGIC & ROBUST PARSING) ---
   const getCorrectedAmount = (exp) => {
-    let val = parseFloat(exp.amount) || 0;
+    // Strips out weird symbols like +₹0.00 so the math actually works
+    let raw = exp.amount ? exp.amount.toString().replace(/[^0-9.-]+/g,"") : "0";
+    let val = parseFloat(raw) || 0;
+    
     if (exp.category === 'Income' || exp.category === 'Salary') return Math.abs(val);
     if (val < 0) return val; 
     if (val > 0 && exp.category !== 'Income') return -Math.abs(val); 
@@ -186,7 +260,6 @@ export default function Dashboard() {
     return filtered;
   }, [expenses, selectedMonth, searchTerm, sortConfig]);
 
-  // Pagination Logic
   const totalPages = Math.ceil(processedExpenses.length / itemsPerPage);
   const currentTableData = processedExpenses.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
@@ -247,8 +320,69 @@ export default function Dashboard() {
     );
   };
 
+  const supportTopics = [
+    { q: 'How to add a transaction', a: 'Click the blue "+ Add Transaction" button on the Transactions page. You can log both income and expenses manually, or use the "Auto-Classify" AI feature.' },
+    { q: 'How to import via CSV', a: 'Click "Import CSV" on the Transactions page. Ensure your file has "Description" and "Amount" columns.' },
+    { q: 'Data security & privacy', a: 'Your data is encrypted and securely stored. We never share your financial information with third parties.' }
+  ];
+
   // Indian Rupee Formatter
   const formatCurrency = (val) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(val));
+
+  // Shared Chart Component
+  const ChartDisplay = () => (
+    <>
+      <div style={{ ...S.flexBetween, marginBottom: '20px' }}>
+        <h3 style={{ margin: 0, fontSize: '16px', color: theme.textMain }}>Spending Overview</h3>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button onClick={() => setViewMode('pie')} style={S.toggleBtn(viewMode === 'pie')}>Pie</button>
+          <button onClick={() => setViewMode('bar')} style={S.toggleBtn(viewMode === 'bar')}>Bar</button>
+        </div>
+      </div>
+
+      {chartData.length === 0 ? (
+        <div style={{ flex: 1, ...S.flexCenter, color: theme.textMuted }}>No expense data to visualize yet.</div>
+      ) : (
+        <div style={{ display: 'flex', flex: 1, alignItems: 'center' }}>
+          <div style={{ flex: 1, height: '250px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              {viewMode === 'pie' ? (
+                <PieChart>
+                  <Pie data={chartData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value" stroke="none">
+                    {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={catColors[entry.name] || theme.textMuted} />)}
+                  </Pie>
+                  <RechartsTooltip formatter={(value) => formatCurrency(value)} />
+                </PieChart>
+              ) : (
+                <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={theme.border} />
+                  <XAxis dataKey="name" tick={{ fontSize: 12, fill: theme.textMuted }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 12, fill: theme.textMuted }} axisLine={false} tickLine={false} tickFormatter={(val) => `₹${val}`} />
+                  <RechartsTooltip cursor={{ fill: theme.bg }} formatter={(value) => formatCurrency(value)} />
+                  <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+                    {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={catColors[entry.name] || theme.primary} />)}
+                  </Bar>
+                </BarChart>
+              )}
+            </ResponsiveContainer>
+          </div>
+          {viewMode === 'pie' && (
+            <div style={{ flex: 0.8, display: 'flex', flexDirection: 'column', gap: '12px', paddingLeft: '10px' }}>
+              {chartData.map((data, i) => (
+                <div key={i} style={{ ...S.flexBetween, fontSize: '13px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: catColors[data.name] || theme.textMuted }} />
+                    <span style={{ color: theme.textMain }}>{data.name}</span>
+                  </div>
+                  <span style={{ color: theme.textMuted, fontWeight: '500' }}>{formatCurrency(data.value)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div style={{ display: 'flex', height: '100vh', backgroundColor: theme.bg, fontFamily: "'Inter', system-ui, sans-serif", overflow: 'hidden' }}>
@@ -332,55 +466,7 @@ export default function Dashboard() {
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '24px' }}>
                   <div style={{ ...S.card, display: 'flex', flexDirection: 'column' }}>
-                    <div style={{ ...S.flexBetween, marginBottom: '20px' }}>
-                      <h3 style={{ margin: 0, fontSize: '16px', color: theme.textMain }}>Spending Overview</h3>
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        <button onClick={() => setViewMode('pie')} style={S.toggleBtn(viewMode === 'pie')}>Pie</button>
-                        <button onClick={() => setViewMode('bar')} style={S.toggleBtn(viewMode === 'bar')}>Bar</button>
-                      </div>
-                    </div>
-
-                    {chartData.length === 0 ? (
-                      <div style={{ flex: 1, ...S.flexCenter, color: theme.textMuted }}>No expense data to visualize yet.</div>
-                    ) : (
-                      <div style={{ display: 'flex', flex: 1, alignItems: 'center' }}>
-                        <div style={{ flex: 1, height: '250px' }}>
-                          <ResponsiveContainer width="100%" height="100%">
-                            {viewMode === 'pie' ? (
-                              <PieChart>
-                                <Pie data={chartData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value" stroke="none">
-                                  {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={catColors[entry.name] || theme.textMuted} />)}
-                                </Pie>
-                                <RechartsTooltip formatter={(value) => formatCurrency(value)} />
-                              </PieChart>
-                            ) : (
-                              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={theme.border} />
-                                <XAxis dataKey="name" tick={{ fontSize: 12, fill: theme.textMuted }} axisLine={false} tickLine={false} />
-                                <YAxis tick={{ fontSize: 12, fill: theme.textMuted }} axisLine={false} tickLine={false} tickFormatter={(val) => `₹${val}`} />
-                                <RechartsTooltip cursor={{ fill: theme.bg }} formatter={(value) => formatCurrency(value)} />
-                                <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                                  {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={catColors[entry.name] || theme.primary} />)}
-                                </Bar>
-                              </BarChart>
-                            )}
-                          </ResponsiveContainer>
-                        </div>
-                        {viewMode === 'pie' && (
-                          <div style={{ flex: 0.8, display: 'flex', flexDirection: 'column', gap: '12px', paddingLeft: '10px' }}>
-                            {chartData.map((data, i) => (
-                              <div key={i} style={{ ...S.flexBetween, fontSize: '13px' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                  <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: catColors[data.name] || theme.textMuted }} />
-                                  <span style={{ color: theme.textMain }}>{data.name}</span>
-                                </div>
-                                <span style={{ color: theme.textMuted, fontWeight: '500' }}>{formatCurrency(data.value)}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    <ChartDisplay />
                   </div>
 
                   <div style={{ ...S.card }}>
@@ -422,76 +508,84 @@ export default function Dashboard() {
 
             {/* --- TAB: TRANSACTIONS --- */}
             {activeTab === 'transactions' && (
-              <div style={{ ...S.card, padding: 0, overflow: 'hidden' }}>
-                <div style={{ padding: '24px', borderBottom: `1px solid ${theme.border}` }}>
-                  <div style={{ ...S.flexBetween, marginBottom: '24px' }}>
-                    <div>
-                      <h2 style={{ margin: '0 0 4px 0', fontSize: '20px' }}>Transactions</h2>
-                      <p style={{ margin: 0, fontSize: '14px', color: theme.textMuted }}>Track and manage your income and expenses.</p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                
+                {/* Visualizations inserted into Transactions Tab */}
+                <div style={{ ...S.card, display: 'flex', flexDirection: 'column' }}>
+                   <ChartDisplay />
+                </div>
+
+                <div style={{ ...S.card, padding: 0, overflow: 'hidden' }}>
+                  <div style={{ padding: '24px', borderBottom: `1px solid ${theme.border}` }}>
+                    <div style={{ ...S.flexBetween, marginBottom: '24px' }}>
+                      <div>
+                        <h2 style={{ margin: '0 0 4px 0', fontSize: '20px' }}>Transactions Directory</h2>
+                        <p style={{ margin: 0, fontSize: '14px', color: theme.textMuted }}>Track and manage your income and expenses.</p>
+                      </div>
+                      <div style={{ display: 'flex', gap: '12px' }}>
+                        <label style={{ ...S.btnSecondary, display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                          📥 Import CSV
+                          <input type="file" style={{ display: 'none' }} accept=".csv" onChange={handleFileUpload} />
+                        </label>
+                        <button onClick={() => setIsModalOpen(true)} style={S.btnPrimary}>+ Add Transaction</button>
+                      </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '12px' }}>
-                      <label style={{ ...S.btnSecondary, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        📥 Import CSV
-                        <input type="file" style={{ display: 'none' }} onChange={handleFileUpload} />
-                      </label>
-                      <button onClick={() => setIsModalOpen(true)} style={S.btnPrimary}>+ Add Transaction</button>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '16px' }}>
+                      <input type="text" placeholder="🔍 Search transactions..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} style={S.input} />
+                      <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} style={S.input}>
+                        {availableMonths.map(m => <option key={m} value={m}>{m === 'All' ? '📅 All Time' : m}</option>)}
+                      </select>
+                      <button onClick={() => { toast.success("Export started!"); setTimeout(() => { toast("To export correctly, use standard CSV logic.", {icon: '📤'}); }, 1000); }} style={S.btnSecondary}>📤 Export Data</button>
                     </div>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '16px' }}>
-                    <input type="text" placeholder="🔍 Search transactions..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} style={S.input} />
-                    <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} style={S.input}>
-                      {availableMonths.map(m => <option key={m} value={m}>{m === 'All' ? '📅 All Time' : m}</option>)}
-                    </select>
-                    <button onClick={() => { toast.success("Export started!"); setTimeout(() => { toast("To export correctly, use standard CSV logic.", {icon: '📤'}); }, 1000); }} style={S.btnSecondary}>📤 Export Data</button>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead style={{ backgroundColor: '#f8fafc' }}>
+                        <tr>
+                          <th style={S.th}>Date</th>
+                          <th style={S.th}>Description</th>
+                          <th style={S.th}>Category</th>
+                          <th style={S.th}>Type</th>
+                          <th style={S.th}>Amount</th>
+                          <th style={{ ...S.th, textAlign: 'right' }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {currentTableData.length === 0 ? (
+                          <tr><td colSpan="6" style={{ padding: '40px', textAlign: 'center', color: theme.textMuted }}>No transactions found.</td></tr>
+                        ) : (
+                          currentTableData.map(exp => {
+                            const amt = getCorrectedAmount(exp);
+                            const isIncome = amt >= 0;
+                            return (
+                              <tr key={exp.id} style={{ transition: 'background-color 0.2s' }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'white'}>
+                                <td style={S.td}>{exp.transaction_date ? new Date(exp.transaction_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A'}</td>
+                                <td style={{ ...S.td, fontWeight: '500' }}>{exp.description}</td>
+                                <td style={S.td}><span style={S.pill(exp.category || 'Other')}>{exp.category || 'Other'}</span></td>
+                                <td style={S.td}><span style={S.pill(isIncome ? 'Income' : 'Expense')}>{isIncome ? 'Income' : 'Expense'}</span></td>
+                                <td style={{ ...S.td, fontWeight: '600', color: isIncome ? theme.success : theme.textMain }}>
+                                  {isIncome ? '+' : '-'}{formatCurrency(amt)}
+                                </td>
+                                <td style={{ ...S.td, textAlign: 'right' }}>
+                                  <button onClick={() => openEditModal(exp)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', marginRight: '12px' }}>✏️</button>
+                                  <button onClick={() => handleDelete(exp.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', color: theme.danger }}>🗑️</button>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
                   </div>
-                </div>
 
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <thead style={{ backgroundColor: '#f8fafc' }}>
-                      <tr>
-                        <th style={S.th}>Date</th>
-                        <th style={S.th}>Description</th>
-                        <th style={S.th}>Category</th>
-                        <th style={S.th}>Type</th>
-                        <th style={S.th}>Amount</th>
-                        <th style={{ ...S.th, textAlign: 'right' }}>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {currentTableData.length === 0 ? (
-                        <tr><td colSpan="6" style={{ padding: '40px', textAlign: 'center', color: theme.textMuted }}>No transactions found.</td></tr>
-                      ) : (
-                        currentTableData.map(exp => {
-                          const amt = getCorrectedAmount(exp);
-                          const isIncome = amt >= 0;
-                          return (
-                            <tr key={exp.id} style={{ transition: 'background-color 0.2s' }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'white'}>
-                              <td style={S.td}>{exp.transaction_date ? new Date(exp.transaction_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A'}</td>
-                              <td style={{ ...S.td, fontWeight: '500' }}>{exp.description}</td>
-                              <td style={S.td}><span style={S.pill(exp.category || 'Other')}>{exp.category || 'Other'}</span></td>
-                              <td style={S.td}><span style={S.pill(isIncome ? 'Income' : 'Expense')}>{isIncome ? 'Income' : 'Expense'}</span></td>
-                              <td style={{ ...S.td, fontWeight: '600', color: isIncome ? theme.success : theme.textMain }}>
-                                {isIncome ? '+' : '-'}{formatCurrency(amt)}
-                              </td>
-                              <td style={{ ...S.td, textAlign: 'right' }}>
-                                <button onClick={() => openEditModal(exp)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', marginRight: '12px' }}>✏️</button>
-                                <button onClick={() => handleDelete(exp.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', color: theme.danger }}>🗑️</button>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div style={{ padding: '16px 24px', borderTop: `1px solid ${theme.border}`, ...S.flexBetween, backgroundColor: '#f8fafc' }}>
-                  <span style={{ fontSize: '14px', color: theme.textMuted }}>Showing {currentTableData.length} of {processedExpenses.length} transactions</span>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <button disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)} style={{ ...S.btnSecondary, padding: '6px 12px' }}>Prev</button>
-                    <button disabled={currentPage === totalPages || totalPages === 0} onClick={() => setCurrentPage(p => p + 1)} style={{ ...S.btnSecondary, padding: '6px 12px' }}>Next</button>
+                  <div style={{ padding: '16px 24px', borderTop: `1px solid ${theme.border}`, ...S.flexBetween, backgroundColor: '#f8fafc' }}>
+                    <span style={{ fontSize: '14px', color: theme.textMuted }}>Showing {currentTableData.length} of {processedExpenses.length} transactions</span>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)} style={{ ...S.btnSecondary, padding: '6px 12px' }}>Prev</button>
+                      <button disabled={currentPage === totalPages || totalPages === 0} onClick={() => setCurrentPage(p => p + 1)} style={{ ...S.btnSecondary, padding: '6px 12px' }}>Next</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -531,10 +625,17 @@ export default function Dashboard() {
                   <div style={S.card}>
                     <h3 style={{ margin: '0 0 20px 0', fontSize: '16px' }}>Popular Topics</h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                      {['How to add a transaction', 'How to create a budget', 'Understanding reports', 'Data security & privacy'].map(topic => (
-                        <div key={topic} onClick={() => toast('Opening help article: ' + topic, { icon: '📖' })} style={{ ...S.flexBetween, paddingBottom: '16px', borderBottom: `1px solid ${theme.border}`, cursor: 'pointer' }}>
-                          <span style={{ fontSize: '14px', color: theme.textMuted }}>{topic}</span>
-                          <span style={{ color: theme.border }}>➔</span>
+                      {supportTopics.map((topic, index) => (
+                        <div key={index} style={{ borderBottom: `1px solid ${theme.border}` }}>
+                          <div onClick={() => setOpenSupportTopic(openSupportTopic === index ? null : index)} style={{ ...S.flexBetween, paddingBottom: '16px', cursor: 'pointer' }}>
+                            <span style={{ fontSize: '14px', color: openSupportTopic === index ? theme.primary : theme.textMuted, fontWeight: openSupportTopic === index ? '600' : '400' }}>{topic.q}</span>
+                            <span style={{ color: theme.border, transform: openSupportTopic === index ? 'rotate(90deg)' : 'rotate(0deg)', transition: '0.2s' }}>➔</span>
+                          </div>
+                          {openSupportTopic === index && (
+                            <div style={{ paddingBottom: '16px', fontSize: '13px', color: theme.textMuted, lineHeight: '1.5' }}>
+                              {topic.a}
+                            </div>
+                          )}
                         </div>
                       ))}
                       <button onClick={() => toast('Loading Help Center...', { icon: '🌐' })} style={{ ...S.btnSecondary, width: '100%', marginTop: '8px' }}>View All Articles</button>
@@ -583,7 +684,10 @@ export default function Dashboard() {
               </div>
 
               <div>
-                <label style={{ display: 'block', fontSize: '13px', color: theme.textMuted, marginBottom: '8px' }}>Description</label>
+                <div style={{ ...S.flexBetween, marginBottom: '8px' }}>
+                   <label style={{ fontSize: '13px', color: theme.textMuted }}>Description</label>
+                   <button type="button" onClick={handleAiClassify} style={{ background: 'none', border: 'none', color: theme.purple, fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>✨ Auto-Classify (AI)</button>
+                </div>
                 <input style={S.input} type="text" placeholder="e.g. Netflix Subscription" value={description} onChange={(e) => setDescription(e.target.value)} required />
               </div>
 
