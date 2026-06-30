@@ -71,32 +71,7 @@ export default function Dashboard() {
   const API_URL = "https://budget-backend-ebjy.onrender.com";
 
   // --- PLAID INTEGRATION ---
-const connectIndianBank = async () => {
-  try {
-    const phone = window.prompt("Enter your phone number registered with your bank:");
-    if (!phone) return;
 
-    const toastId = toast.loading("Generating secure connection...");
-    
-    // 1. Call your backend
-    const response = await axios.post(`${API_URL}/api/setu/create_consent`, { 
-      userPhoneNumber: phone 
-    });
-    
-    toast.dismiss(toastId);
-
-    // 2. Redirect user to Setu's UI to approve the request via OTP
-    window.location.href = response.data.url;
-
-  } catch (err) {
-    toast.error("Failed to connect to Account Aggregator.");
-  }
-};
-
-// In your JSX:
-<button onClick={connectIndianBank} style={S.btnSecondary}>
-  🏦 Connect Indian Bank
-</button>
 
   // --- API CALLS ---
   const fetchExpenses = async () => {
