@@ -71,7 +71,31 @@ export default function Dashboard() {
   const API_URL = "https://budget-backend-ebjy.onrender.com";
 
   // --- PLAID INTEGRATION ---
+  const [linkToken, setLinkToken] = useState(null);
 
+  useEffect(() => {
+    const fetchLinkToken = async () => {
+      try {
+        const response = await axios.post(`${API_URL}/api/create_link_token`);
+        setLinkToken(response.data.link_token);
+      } catch (err) { 
+        console.error("Plaid Error fetching link token:", err); 
+      }
+    };
+    fetchLinkToken();
+  }, []);
+
+  const { open: openPlaid, ready: plaidReady } = usePlaidLink({
+    token: linkToken,
+    onSuccess: async (public_token) => {
+      try {
+        await axios.post(`${API_URL}/api/exchange_public_token`, { public_token, userId });
+        toast.success("Bank connected successfully!");
+      } catch (err) {
+        toast.error("Failed to connect bank.");
+      }
+    },
+  });
 
   // --- API CALLS ---
   const fetchExpenses = async () => {
