@@ -1,63 +1,98 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import axios from 'axios';
-import { PieChart, Pie, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import toast, { Toaster } from 'react-hot-toast';
+
+// --- DESIGN SYSTEM TOKENS ---
+const theme = {
+  sidebar: '#0b1121',
+  sidebarHover: '#1e293b',
+  bg: '#f3f4f6',
+  card: '#ffffff',
+  textMain: '#0f172a',
+  textMuted: '#64748b',
+  border: '#e2e8f0',
+  primary: '#3b82f6',
+  primaryHover: '#2563eb',
+  success: '#10b981',
+  successBg: '#d1fae5',
+  danger: '#ef4444',
+  dangerBg: '#fee2e2',
+  warning: '#f59e0b',
+  warningBg: '#fef3c7',
+  purple: '#8b5cf6',
+  purpleBg: '#ede9fe',
+  pink: '#ec4899',
+  pinkBg: '#fce7f3'
+};
+
+const catColors = {
+  'Rent': theme.primary,
+  'Housing': theme.primary,
+  'Food': theme.success,
+  'Transport': theme.warning,
+  'Transportation': theme.warning,
+  'Shopping': theme.pink,
+  'Entertainment': theme.purple,
+  'Income': theme.success,
+  'Other': theme.textMuted
+};
 
 export default function Dashboard() {
   const [expenses, setExpenses] = useState([]);
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
-  const [editingId, setEditingId] = useState(null);
+  const [type, setType] = useState('expense'); // 'expense' or 'income'
   
-  // Filtering & Sorting State
+  const [editingId, setEditingId] = useState(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  
+  // Filtering, Sorting, Pagination
   const [selectedMonth, setSelectedMonth] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'transaction_date', direction: 'desc' });
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 8;
   
-  // Navigation and View State
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [viewMode, setViewMode] = useState('pie');
+  const [activeTab, setActiveTab] = useState('overview'); // 'overview', 'transactions', 'support'
   
   const navigate = useNavigate();
   const userId = localStorage.getItem('userId');
   const API_URL = "https://budget-backend-ebjy.onrender.com";
 
+  // --- API CALLS ---
   const fetchExpenses = async () => {
-    if (!userId) {
-      navigate('/');
-      return;
-    }
-    
+    if (!userId) { navigate('/'); return; }
     try {
       const res = await axios.get(`${API_URL}/api/expenses?userId=${userId}`);
       setExpenses(res.data);
-    } catch (err) { 
-      toast.error("Failed to load data.");
-    }
+    } catch (err) { toast.error("Failed to load data."); }
   };
 
   useEffect(() => { fetchExpenses(); }, []);
 
-  // --- CRUD OPERATIONS ---
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      const payload = { amount, description, category, userId };
+      // If expense, ensure amount is negative internally for calculations, or just handle logically. 
+      // Based on mockup, income is +, expense is -.
+      let finalAmount = Math.abs(parseFloat(amount));
+      if (type === 'expense') finalAmount = -finalAmount;
+
+      const payload = { amount: finalAmount, description, category, userId };
+      
       if (editingId) {
         await axios.put(`${API_URL}/api/expenses/${editingId}`, payload);
-        toast.success("Expense updated!");
-        setEditingId(null);
+        toast.success("Transaction updated!");
       } else {
         await axios.post(`${API_URL}/api/expenses`, payload);
-        toast.success("Expense added!");
+        toast.success("Transaction added!");
       }
-      setAmount(''); setDescription(''); setCategory('');
+      closeModal();
       fetchExpenses();
-    } catch (err) {
-      toast.error("Something went wrong.");
-    }
+    } catch (err) { toast.error("Something went wrong."); }
   };
 
   const handleFileUpload = async (e) => {
@@ -66,181 +101,483 @@ export default function Dashboard() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('userId', userId);
-    
     toast.promise(
       axios.post(`${API_URL}/api/upload`, formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
-      {
-        loading: 'Uploading CSV...',
-        success: 'Upload complete!',
-        error: 'Upload failed.'
-      }
+      { loading: 'Importing data...', success: 'Import complete!', error: 'Import failed.' }
     ).then(() => fetchExpenses());
   };
 
-  const handleEdit = (exp) => {
-    setEditingId(exp.id);
-    setDescription(exp.description);
-    setAmount(exp.amount);
-    setCategory(exp.category || '');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
   const handleDelete = async (id) => {
-    if (window.confirm("Delete this expense permanently?")) {
+    if (window.confirm("Delete this transaction?")) {
       try {
         await axios.delete(`${API_URL}/api/expenses/${id}`);
-        toast.success("Expense deleted.");
+        toast.success("Transaction deleted.");
         fetchExpenses();
-      } catch (err) {
-        toast.error("Failed to delete.");
-      }
+      } catch (err) { toast.error("Failed to delete."); }
     }
   };
 
-  // --- DATA PROCESSING (SEARCH, FILTER, SORT) ---
+  const openEditModal = (exp) => {
+    setEditingId(exp.id);
+    setDescription(exp.description);
+    setAmount(Math.abs(exp.amount));
+    setType(parseFloat(exp.amount) >= 0 ? 'income' : 'expense');
+    setCategory(exp.category || '');
+    setIsModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setEditingId(null);
+    setDescription('');
+    setAmount('');
+    setCategory('');
+    setType('expense');
+  };
+
+  // --- DATA PROCESSING ---
   const availableMonths = ['All', ...new Set(expenses.map(exp => {
     if (!exp.transaction_date) return 'Unknown Date';
     const d = new Date(exp.transaction_date);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
   }))];
 
-  let processedExpenses = expenses.filter(exp => {
-    let monthMatch = true;
-    if (selectedMonth !== 'All') {
-      if (!exp.transaction_date) monthMatch = (selectedMonth === 'Unknown Date');
-      else {
-        const d = new Date(exp.transaction_date);
-        monthMatch = (`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === selectedMonth);
+  const processedExpenses = useMemo(() => {
+    let filtered = expenses.filter(exp => {
+      let monthMatch = true;
+      if (selectedMonth !== 'All') {
+        if (!exp.transaction_date) monthMatch = (selectedMonth === 'Unknown Date');
+        else {
+          const d = new Date(exp.transaction_date);
+          monthMatch = (`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === selectedMonth);
+        }
       }
-    }
-    const searchMatch = exp.description.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                        (exp.category && exp.category.toLowerCase().includes(searchTerm.toLowerCase()));
-    
-    return monthMatch && searchMatch;
-  });
-
-  processedExpenses.sort((a, b) => {
-    let valA = a[sortConfig.key];
-    let valB = b[sortConfig.key];
-    if (sortConfig.key === 'amount') {
-      valA = parseFloat(valA) || 0;
-      valB = parseFloat(valB) || 0;
-    }
-    if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
-    if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
-    return 0;
-  });
-
-  const handleSort = (key) => {
-    let direction = 'asc';
-    if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
-    setSortConfig({ key, direction });
-  };
-
-  const exportToCSV = () => {
-    if (processedExpenses.length === 0) return toast.error("No data to export.");
-    const headers = ['Date', 'Description', 'Category', 'Amount'];
-    const csvRows = [headers.join(',')];
-    processedExpenses.forEach(exp => {
-      const date = exp.transaction_date ? new Date(exp.transaction_date).toLocaleDateString() : 'N/A';
-      const desc = `"${exp.description.replace(/"/g, '""')}"`; 
-      const cat = exp.category || 'Other';
-      const amt = parseFloat(exp.amount).toFixed(2);
-      csvRows.push([date, desc, cat, amt].join(','));
+      const searchMatch = exp.description.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                          (exp.category && exp.category.toLowerCase().includes(searchTerm.toLowerCase()));
+      return monthMatch && searchMatch;
     });
-    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.setAttribute('hidden', '');
-    a.setAttribute('href', url);
-    a.setAttribute('download', `Budget_Export_${selectedMonth}.csv`);
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    toast.success("CSV Downloaded!");
-  };
 
-  const totalSpent = processedExpenses.reduce((sum, exp) => sum + parseFloat(exp.amount), 0);
-  const avgExpense = processedExpenses.length > 0 ? (totalSpent / processedExpenses.length) : 0;
-  const categoryTotals = processedExpenses.reduce((acc, exp) => {
-    const cat = exp.category || 'Other';
-    acc[cat] = (acc[cat] || 0) + parseFloat(exp.amount);
+    filtered.sort((a, b) => {
+      let valA = a[sortConfig.key], valB = b[sortConfig.key];
+      if (sortConfig.key === 'amount') { valA = parseFloat(valA) || 0; valB = parseFloat(valB) || 0; }
+      if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return filtered;
+  }, [expenses, selectedMonth, searchTerm, sortConfig]);
+
+  // Pagination Logic
+  const totalPages = Math.ceil(processedExpenses.length / itemsPerPage);
+  const currentTableData = processedExpenses.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+
+  // --- CALCULATIONS FOR UI ---
+  const totalIncome = expenses.reduce((sum, exp) => parseFloat(exp.amount) > 0 ? sum + parseFloat(exp.amount) : sum, 0);
+  const totalSpent = expenses.reduce((sum, exp) => parseFloat(exp.amount) < 0 ? sum + Math.abs(parseFloat(exp.amount)) : sum, 0);
+  const netSavings = totalIncome - totalSpent;
+  
+  // Category Breakdown (Expenses only for donut chart)
+  const categoryTotals = expenses.reduce((acc, exp) => {
+    const amt = parseFloat(exp.amount);
+    if (amt < 0) {
+      const cat = exp.category || 'Others';
+      acc[cat] = (acc[cat] || 0) + Math.abs(amt);
+    }
     return acc;
   }, {});
+
   const highestCategory = Object.keys(categoryTotals).length > 0 
     ? Object.keys(categoryTotals).reduce((a, b) => categoryTotals[a] > categoryTotals[b] ? a : b) 
     : 'N/A';
+  
   const chartData = Object.keys(categoryTotals).map(key => ({ name: key, value: categoryTotals[key] })).filter(item => item.value > 0);
-  const COLORS = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4'];
+  
+  // --- SHARED STYLES ---
+  const S = {
+    flexCenter: { display: 'flex', alignItems: 'center', justifyContent: 'center' },
+    flexBetween: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+    card: { backgroundColor: theme.card, borderRadius: '16px', padding: '24px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.02), 0 2px 4px -2px rgba(0,0,0,0.02)', border: `1px solid ${theme.border}` },
+    input: { padding: '10px 14px', borderRadius: '8px', border: `1px solid ${theme.border}`, outline: 'none', fontSize: '14px', color: theme.textMain, width: '100%', boxSizing: 'border-box' },
+    btnPrimary: { backgroundColor: theme.primary, color: 'white', padding: '10px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: '500', fontSize: '14px', transition: '0.2s' },
+    btnSecondary: { backgroundColor: 'white', color: theme.textMain, padding: '10px 16px', borderRadius: '8px', border: `1px solid ${theme.border}`, cursor: 'pointer', fontWeight: '500', fontSize: '14px', transition: '0.2s' },
+    th: { padding: '16px 20px', color: theme.textMuted, fontSize: '13px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: `1px solid ${theme.border}`, cursor: 'pointer', textAlign: 'left' },
+    td: { padding: '16px 20px', fontSize: '14px', color: theme.textMain, borderBottom: `1px solid ${theme.border}` },
+    pill: (cat) => {
+      const isIncome = cat === 'Income';
+      const color = catColors[cat] || theme.textMuted;
+      const bg = isIncome ? theme.successBg : `${color}20`; // Hex transparency hack
+      return { padding: '4px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: '600', color: color, backgroundColor: bg, display: 'inline-block' };
+    }
+  };
 
-  const containerStyle = { background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)', minHeight: '100vh', fontFamily: "'Inter', system-ui, sans-serif", display: 'flex' };
-  const cardStyle = { backgroundColor: 'rgba(255, 255, 255, 0.9)', backdropFilter: 'blur(10px)', padding: '25px', borderRadius: '16px', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05), 0 8px 10px -6px rgba(0,0,0,0.01)', flex: 1 };
-  const inputStyle = { padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', outline: 'none', transition: 'border 0.2s', flex: 1 };
-  const btnStyle = { padding: '10px 20px', backgroundColor: editingId ? '#f59e0b' : '#2563eb', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', transition: 'transform 0.1s, background-color 0.2s' };
-  const thStyle = { padding: '15px 12px', color: '#475569', cursor: 'pointer', userSelect: 'none', borderBottom: '2px solid #e2e8f0' };
-  const sidebarStyle = { width: '250px', backgroundColor: '#0f172a', color: 'white', display: 'flex', flexDirection: 'column' };
-  const navItemStyle = (tab) => ({ padding: '20px', cursor: 'pointer', backgroundColor: activeTab === tab ? '#1e293b' : 'transparent', borderLeft: activeTab === tab ? '4px solid #3b82f6' : '4px solid transparent', transition: '0.2s' });
+  // --- SUB-COMPONENTS ---
+  const NavItem = ({ id, icon, label }) => {
+    const isActive = activeTab === id;
+    return (
+      <div onClick={() => setActiveTab(id)} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 20px', margin: '4px 16px', borderRadius: '8px', cursor: 'pointer', backgroundColor: isActive ? theme.primary : 'transparent', color: isActive ? 'white' : '#94a3b8', transition: 'all 0.2s ease', fontWeight: isActive ? '600' : '500' }}>
+        <span style={{ fontSize: '18px' }}>{icon}</span>
+        <span>{label}</span>
+      </div>
+    );
+  };
+
+  const formatCurrency = (val) => `$${Math.abs(val).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 
   return (
-    <div style={containerStyle}>
-      <Toaster position="bottom-right" />
-      <aside style={sidebarStyle}>
-        <div style={{ padding: '30px 20px', fontSize: '20px', fontWeight: 'bold', borderBottom: '1px solid #334155', marginBottom: '20px' }}>💎 Budget Insights</div>
-        <div style={navItemStyle('home')} onClick={() => setActiveTab('home')}>🏠 Home</div>
-        <div style={navItemStyle('dashboard')} onClick={() => setActiveTab('dashboard')}>📊 Dashboard</div>
-        <div style={navItemStyle('support')} onClick={() => setActiveTab('support')}>🎧 Support</div>
-        <div style={{ marginTop: 'auto', padding: '20px' }}>
-          <button onClick={() => { localStorage.removeItem('userId'); navigate('/'); }} style={{ width: '100%', backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', padding: '10px', borderRadius: '8px', cursor: 'pointer', fontWeight: '600' }}>Sign Out</button>
+    <div style={{ display: 'flex', height: '100vh', backgroundColor: theme.bg, fontFamily: "'Inter', system-ui, sans-serif", overflow: 'hidden' }}>
+      <Toaster position="top-right" />
+
+      {/* --- SIDEBAR --- */}
+      <aside style={{ width: '260px', backgroundColor: theme.sidebar, color: 'white', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+        <div style={{ padding: '32px 24px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{ width: '32px', height: '32px', backgroundColor: theme.primary, borderRadius: '8px', ...S.flexCenter, fontSize: '18px' }}>💎</div>
+          <span style={{ fontSize: '20px', fontWeight: 'bold', letterSpacing: '0.5px' }}>Budget Insights</span>
+        </div>
+        
+        <div style={{ flex: 1, marginTop: '10px' }}>
+          <NavItem id="overview" icon="🏠" label="Overview" />
+          <NavItem id="transactions" icon="📊" label="Transactions" />
+          <NavItem id="support" icon="🎧" label="Support" />
+          
+          <div style={{ padding: '0 36px', marginTop: '15px', display: 'flex', flexDirection: 'column', gap: '15px', opacity: 0.5 }}>
+            <div style={{ fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px', color: '#64748b', marginTop: '20px', marginBottom: '5px' }}>Coming Soon</div>
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'center', fontSize: '14px' }}><span>🎯</span> Goals</div>
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'center', fontSize: '14px' }}><span>📈</span> Reports</div>
+          </div>
+        </div>
+
+        {/* Upgrade Card Mock */}
+        <div style={{ margin: '24px', padding: '20px', backgroundColor: '#1e293b', borderRadius: '12px', position: 'relative', overflow: 'hidden' }}>
+          <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: 'white' }}>🚀 Upgrade to Pro</h4>
+          <p style={{ margin: '0 0 16px 0', fontSize: '12px', color: '#94a3b8', lineHeight: '1.5' }}>Unlock advanced reports, custom budgets & more.</p>
+          <button style={{ width: '100%', padding: '8px', backgroundColor: theme.primary, color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>Upgrade Now</button>
+        </div>
+
+        <div style={{ padding: '24px', borderTop: '1px solid #1e293b' }}>
+          <button onClick={() => { localStorage.removeItem('userId'); navigate('/'); }} style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', width: '100%', padding: '8px 0' }}>
+            <span>🚪</span> Sign Out
+          </button>
         </div>
       </aside>
 
-      <main style={{ flex: 1, height: '100vh', overflowY: 'auto', paddingBottom: '50px' }}>
-        <nav style={{ backgroundColor: 'white', padding: '15px 40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)' }}>
-          <h2 style={{ margin: 0, color: '#0f172a' }}>{activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}</h2>
-        </nav>
-
-        <div style={{ maxWidth: '1300px', margin: '0 auto', padding: '0 20px' }}>
-          {activeTab === 'home' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-              <div style={cardStyle}><h1>Welcome to Budget Insights! 👋</h1><p style={{ color: '#64748b', fontSize: '18px' }}>We are thrilled to help you take control of your finances.</p></div>
+      {/* --- MAIN CONTENT --- */}
+      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        
+        {/* Top Header */}
+        <header style={{ height: '80px', backgroundColor: 'white', borderBottom: `1px solid ${theme.border}`, padding: '0 40px', ...S.flexBetween, flexShrink: 0 }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: '24px', color: theme.textMain, fontWeight: '700' }}>Welcome back 👋</h1>
+            <p style={{ margin: '4px 0 0 0', fontSize: '14px', color: theme.textMuted }}>Here's what's happening with your finances today.</p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+            <button style={{ background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', position: 'relative' }}>
+              🔔<span style={{ position: 'absolute', top: 0, right: 0, width: '8px', height: '8px', backgroundColor: theme.danger, borderRadius: '50%' }}></span>
+            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '6px 12px', border: `1px solid ${theme.border}`, borderRadius: '24px', cursor: 'pointer' }}>
+              <div style={{ width: '30px', height: '30px', backgroundColor: theme.purple, borderRadius: '50%', color: 'white', ...S.flexCenter, fontWeight: 'bold', fontSize: '14px' }}>U</div>
+              <span style={{ fontSize: '14px', fontWeight: '500', color: theme.textMain }}>My Profile</span>
             </div>
-          )}
-          {activeTab === 'support' && (
-            <div style={cardStyle}><h1>Need Help?</h1><ul style={{ listStyle: 'none', padding: 0 }}><li>📧 support@budgetinsights.com</li><li>📞 +91 9491143778</li></ul></div>
-          )}
-          {activeTab === 'dashboard' && (
-            <>
-              <div style={{ display: 'flex', gap: '20px', marginBottom: '30px', flexWrap: 'wrap' }}>
-                <div style={{ ...cardStyle, borderTop: '4px solid #3b82f6' }}><h2>Total Spent: ${totalSpent.toFixed(2)}</h2></div>
-                <div style={{ ...cardStyle, borderTop: '4px solid #10b981' }}><h2>Highest: {highestCategory}</h2></div>
-                <div style={{ ...cardStyle, borderTop: '4px solid #f59e0b' }}><h2>Average: ${avgExpense.toFixed(2)}</h2></div>
-              </div>
-              <div style={cardStyle}>
-                <div style={{ display: 'flex', gap: '5px', marginBottom: '10px' }}>
-                  <button onClick={() => setViewMode('pie')}>Pie</button>
-                  <button onClick={() => setViewMode('bar')}>Bar</button>
+          </div>
+        </header>
+
+        {/* Scrollable Area */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '32px 40px' }}>
+          <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
+
+            {/* --- TAB: OVERVIEW --- */}
+            {activeTab === 'overview' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                
+                {/* 4 Summary Cards */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '24px' }}>
+                  <div style={{ ...S.card }}>
+                    <p style={{ margin: '0 0 8px 0', fontSize: '14px', color: theme.textMuted, fontWeight: '500' }}>Total Spent</p>
+                    <h2 style={{ margin: 0, fontSize: '32px', color: theme.primary }}>{formatCurrency(totalSpent)}</h2>
+                  </div>
+                  <div style={{ ...S.card }}>
+                    <p style={{ margin: '0 0 8px 0', fontSize: '14px', color: theme.textMuted, fontWeight: '500' }}>Highest Expense</p>
+                    <h2 style={{ margin: 0, fontSize: '32px', color: theme.success }}>{highestCategory}</h2>
+                  </div>
+                  <div style={{ ...S.card }}>
+                    <p style={{ margin: '0 0 8px 0', fontSize: '14px', color: theme.textMuted, fontWeight: '500' }}>Total Income</p>
+                    <h2 style={{ margin: 0, fontSize: '32px', color: theme.warning }}>{formatCurrency(totalIncome)}</h2>
+                  </div>
+                  <div style={{ ...S.card }}>
+                    <p style={{ margin: '0 0 8px 0', fontSize: '14px', color: theme.textMuted, fontWeight: '500' }}>Net Savings</p>
+                    <h2 style={{ margin: 0, fontSize: '32px', color: theme.purple }}>{formatCurrency(netSavings)}</h2>
+                  </div>
                 </div>
-                <ResponsiveContainer width="100%" height={300}>
-                  {viewMode === 'pie' ? <PieChart><Pie data={chartData} dataKey="value" nameKey="name" label>{chartData.map((e,i) => <Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Pie><Tooltip /><Legend /></PieChart> : <BarChart data={chartData}><XAxis dataKey="name"/><YAxis/><Tooltip/><Bar dataKey="value" fill="#2563eb"/></BarChart>}
-                </ResponsiveContainer>
+
+                {/* Middle Row: Chart & List */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '24px' }}>
+                  {/* Donut Chart */}
+                  <div style={{ ...S.card, display: 'flex', flexDirection: 'column' }}>
+                    <h3 style={{ margin: '0 0 20px 0', fontSize: '16px', color: theme.textMain }}>Spending Overview</h3>
+                    {chartData.length === 0 ? (
+                      <div style={{ flex: 1, ...S.flexCenter, color: theme.textMuted }}>No expense data yet.</div>
+                    ) : (
+                      <div style={{ display: 'flex', flex: 1, alignItems: 'center' }}>
+                        <div style={{ flex: 1, height: '250px' }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <PieChart>
+                              <Pie data={chartData} cx="50%" cy="50%" innerRadius={70} outerRadius={100} paddingAngle={2} dataKey="value" stroke="none">
+                                {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={catColors[entry.name] || theme.textMuted} />)}
+                              </Pie>
+                              <RechartsTooltip formatter={(value) => formatCurrency(value)} />
+                            </PieChart>
+                          </ResponsiveContainer>
+                        </div>
+                        {/* Custom Legend */}
+                        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                          {chartData.map((data, i) => (
+                            <div key={i} style={{ ...S.flexBetween, fontSize: '14px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: catColors[data.name] || theme.textMuted }} />
+                                <span style={{ color: theme.textMain }}>{data.name}</span>
+                              </div>
+                              <span style={{ color: theme.textMuted, fontWeight: '500' }}>{formatCurrency(data.value)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Recent Transactions Widget */}
+                  <div style={{ ...S.card }}>
+                    <div style={{ ...S.flexBetween, marginBottom: '20px' }}>
+                      <h3 style={{ margin: 0, fontSize: '16px', color: theme.textMain }}>Recent Transactions</h3>
+                      <span onClick={() => setActiveTab('transactions')} style={{ fontSize: '14px', color: theme.primary, cursor: 'pointer', fontWeight: '500' }}>View all</span>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      {expenses.slice(0, 5).map(exp => {
+                        const isIncome = parseFloat(exp.amount) >= 0;
+                        return (
+                          <div key={exp.id} style={{ ...S.flexBetween, padding: '12px 0', borderBottom: `1px solid ${theme.border}` }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                              <div style={{ width: '40px', height: '40px', backgroundColor: theme.bg, borderRadius: '10px', ...S.flexCenter, fontSize: '16px' }}>
+                                {isIncome ? '💰' : '💳'}
+                              </div>
+                              <div>
+                                <div style={{ fontSize: '14px', fontWeight: '600', color: theme.textMain, marginBottom: '4px' }}>{exp.description}</div>
+                                <div style={{ fontSize: '12px', color: theme.textMuted }}>{exp.category || 'Other'}</div>
+                              </div>
+                            </div>
+                            <div style={{ textAlign: 'right' }}>
+                              <div style={{ fontSize: '14px', fontWeight: '600', color: isIncome ? theme.success : theme.textMain }}>
+                                {isIncome ? '+' : '-'}{formatCurrency(exp.amount)}
+                              </div>
+                              <div style={{ fontSize: '12px', color: theme.textMuted, marginTop: '4px' }}>
+                                {exp.transaction_date ? new Date(exp.transaction_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div style={{...cardStyle, marginTop: '20px'}}>
-                <form onSubmit={handleSubmit} style={{display: 'flex', gap: '10px', marginBottom: '20px'}}>
-                  <input style={inputStyle} value={description} placeholder="Description" onChange={(e) => setDescription(e.target.value)} required />
-                  <input style={inputStyle} type="number" value={amount} placeholder="$" onChange={(e) => setAmount(e.target.value)} required />
-                  <button type="submit" style={btnStyle}>{editingId ? "Update" : "Add"}</button>
-                </form>
-                <input type="file" onChange={handleFileUpload} />
-                <button onClick={exportToCSV}>📥 CSV</button>
-                <table style={{ width: '100%' }}>
-                  <thead><tr><th style={thStyle} onClick={() => handleSort('transaction_date')}>Date</th><th style={thStyle} onClick={() => handleSort('description')}>Description</th><th style={thStyle} onClick={() => handleSort('category')}>Category</th><th style={thStyle} onClick={() => handleSort('amount')}>Amount</th><th>Actions</th></tr></thead>
-                  <tbody>{processedExpenses.map(exp => <tr key={exp.id}><td>{new Date(exp.transaction_date).toLocaleDateString()}</td><td>{exp.description}</td><td>{exp.category}</td><td>${parseFloat(exp.amount).toFixed(2)}</td><td><button onClick={() => handleEdit(exp)}>✏️</button><button onClick={() => handleDelete(exp.id)}>🗑️</button></td></tr>)}</tbody>
-                </table>
+            )}
+
+            {/* --- TAB: TRANSACTIONS --- */}
+            {activeTab === 'transactions' && (
+              <div style={{ ...S.card, padding: 0, overflow: 'hidden' }}>
+                {/* Header & Controls */}
+                <div style={{ padding: '24px', borderBottom: `1px solid ${theme.border}` }}>
+                  <div style={{ ...S.flexBetween, marginBottom: '24px' }}>
+                    <div>
+                      <h2 style={{ margin: '0 0 4px 0', fontSize: '20px' }}>Transactions</h2>
+                      <p style={{ margin: 0, fontSize: '14px', color: theme.textMuted }}>Track and manage your income and expenses.</p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '12px' }}>
+                      <label style={{ ...S.btnSecondary, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        📥 Import CSV
+                        <input type="file" style={{ display: 'none' }} onChange={handleFileUpload} />
+                      </label>
+                      <button onClick={() => setIsModalOpen(true)} style={S.btnPrimary}>+ Add Transaction</button>
+                    </div>
+                  </div>
+
+                  {/* Filters */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '16px' }}>
+                    <input type="text" placeholder="🔍 Search transactions..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} style={S.input} />
+                    <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} style={S.input}>
+                      {availableMonths.map(m => <option key={m} value={m}>{m === 'All' ? '📅 All Time' : m}</option>)}
+                    </select>
+                    {/* Dummy export button to fill grid */}
+                    <button onClick={() => toast.success("Export started!")} style={S.btnSecondary}>📤 Export Data</button>
+                  </div>
+                </div>
+
+                {/* Table */}
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead style={{ backgroundColor: '#f8fafc' }}>
+                      <tr>
+                        <th style={S.th}>Date</th>
+                        <th style={S.th}>Description</th>
+                        <th style={S.th}>Category</th>
+                        <th style={S.th}>Type</th>
+                        <th style={S.th}>Amount</th>
+                        <th style={{ ...S.th, textAlign: 'right' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {currentTableData.length === 0 ? (
+                        <tr><td colSpan="6" style={{ padding: '40px', textAlign: 'center', color: theme.textMuted }}>No transactions found.</td></tr>
+                      ) : (
+                        currentTableData.map(exp => {
+                          const isIncome = parseFloat(exp.amount) >= 0;
+                          return (
+                            <tr key={exp.id} style={{ transition: 'background-color 0.2s' }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'white'}>
+                              <td style={S.td}>{exp.transaction_date ? new Date(exp.transaction_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A'}</td>
+                              <td style={{ ...S.td, fontWeight: '500' }}>{exp.description}</td>
+                              <td style={S.td}><span style={S.pill(exp.category || 'Other')}>{exp.category || 'Other'}</span></td>
+                              <td style={S.td}><span style={S.pill(isIncome ? 'Income' : 'Expense')}>{isIncome ? 'Income' : 'Expense'}</span></td>
+                              <td style={{ ...S.td, fontWeight: '600', color: isIncome ? theme.success : theme.textMain }}>
+                                {isIncome ? '+' : '-'}{formatCurrency(exp.amount)}
+                              </td>
+                              <td style={{ ...S.td, textAlign: 'right' }}>
+                                <button onClick={() => openEditModal(exp)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', marginRight: '12px' }}>✏️</button>
+                                <button onClick={() => handleDelete(exp.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', color: theme.danger }}>🗑️</button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination */}
+                <div style={{ padding: '16px 24px', borderTop: `1px solid ${theme.border}`, ...S.flexBetween, backgroundColor: '#f8fafc' }}>
+                  <span style={{ fontSize: '14px', color: theme.textMuted }}>Showing {currentTableData.length} of {processedExpenses.length} transactions</span>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)} style={{ ...S.btnSecondary, padding: '6px 12px' }}>Prev</button>
+                    <button disabled={currentPage === totalPages || totalPages === 0} onClick={() => setCurrentPage(p => p + 1)} style={{ ...S.btnSecondary, padding: '6px 12px' }}>Next</button>
+                  </div>
+                </div>
               </div>
-            </>
-          )}
+            )}
+
+            {/* --- TAB: SUPPORT --- */}
+            {activeTab === 'support' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                <div>
+                  <h2 style={{ margin: '0 0 8px 0', fontSize: '24px' }}>Support</h2>
+                  <p style={{ margin: 0, color: theme.textMuted }}>We're here to help you with any questions.</p>
+                </div>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '24px' }}>
+                  {/* Contact Info */}
+                  <div style={S.card}>
+                    <h3 style={{ margin: '0 0 20px 0', fontSize: '16px' }}>Get in Touch</h3>
+                    <p style={{ fontSize: '14px', color: theme.textMuted, marginBottom: '24px' }}>Can't find what you're looking for? Reach out to our support team.</p>
+                    
+                    <div style={{ display: 'flex', gap: '16px', marginBottom: '24px' }}>
+                      <div style={{ width: '40px', height: '40px', backgroundColor: theme.primary + '20', color: theme.primary, borderRadius: '50%', ...S.flexCenter, fontSize: '18px' }}>✉️</div>
+                      <div>
+                        <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '4px' }}>Email Support</div>
+                        <div style={{ fontSize: '14px', color: theme.primary }}>support@budgetinsights.com</div>
+                      </div>
+                    </div>
+                    
+                    <div style={{ display: 'flex', gap: '16px' }}>
+                      <div style={{ width: '40px', height: '40px', backgroundColor: theme.success + '20', color: theme.success, borderRadius: '50%', ...S.flexCenter, fontSize: '18px' }}>📞</div>
+                      <div>
+                        <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '4px' }}>Phone Support</div>
+                        <div style={{ fontSize: '14px', color: theme.textMuted }}>+91 9491143778</div>
+                        <div style={{ fontSize: '12px', color: theme.textMuted, marginTop: '2px' }}>Mon - Fri, 9:00 AM - 6:00 PM</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Quick Links */}
+                  <div style={S.card}>
+                    <h3 style={{ margin: '0 0 20px 0', fontSize: '16px' }}>Popular Topics</h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                      {['How to add a transaction', 'How to create a budget', 'Understanding reports', 'Data security & privacy'].map(topic => (
+                        <div key={topic} style={{ ...S.flexBetween, paddingBottom: '16px', borderBottom: `1px solid ${theme.border}`, cursor: 'pointer' }}>
+                          <span style={{ fontSize: '14px', color: theme.textMuted }}>{topic}</span>
+                          <span style={{ color: theme.border }}>➔</span>
+                        </div>
+                      ))}
+                      <button style={{ ...S.btnSecondary, width: '100%', marginTop: '8px' }}>View All Articles</button>
+                    </div>
+                  </div>
+
+                  {/* Form */}
+                  <div style={S.card}>
+                    <h3 style={{ margin: '0 0 20px 0', fontSize: '16px' }}>Send us a message</h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                      <input style={S.input} placeholder="Your Name" />
+                      <input style={S.input} placeholder="Your Email" />
+                      <textarea style={{ ...S.input, height: '100px', resize: 'vertical' }} placeholder="How can we help you?"></textarea>
+                      <button style={S.btnPrimary} onClick={() => toast.success("Message sent!")}>Send Message</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </div>
         </div>
       </main>
+
+      {/* --- ADD/EDIT MODAL --- */}
+      {isModalOpen && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.6)', backdropFilter: 'blur(4px)', zIndex: 1000, ...S.flexCenter }}>
+          <div style={{ width: '100%', maxWidth: '450px', backgroundColor: 'white', borderRadius: '16px', padding: '32px', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)' }}>
+            <div style={{ ...S.flexBetween, marginBottom: '24px' }}>
+              <h2 style={{ margin: 0, fontSize: '20px' }}>{editingId ? 'Edit Transaction' : 'New Transaction'}</h2>
+              <button onClick={closeModal} style={{ background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', color: theme.textMuted }}>✕</button>
+            </div>
+            
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              
+              {/* Type Toggle */}
+              <div style={{ display: 'flex', backgroundColor: theme.bg, borderRadius: '8px', padding: '4px' }}>
+                <div onClick={() => setType('expense')} style={{ flex: 1, textAlign: 'center', padding: '8px', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', fontWeight: '500', backgroundColor: type === 'expense' ? 'white' : 'transparent', boxShadow: type === 'expense' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', color: type === 'expense' ? theme.danger : theme.textMuted }}>Expense</div>
+                <div onClick={() => setType('income')} style={{ flex: 1, textAlign: 'center', padding: '8px', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', fontWeight: '500', backgroundColor: type === 'income' ? 'white' : 'transparent', boxShadow: type === 'income' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', color: type === 'income' ? theme.success : theme.textMuted }}>Income</div>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '13px', color: theme.textMuted, marginBottom: '8px' }}>Amount</label>
+                <div style={{ position: 'relative' }}>
+                  <span style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: theme.textMuted }}>$</span>
+                  <input style={{ ...S.input, paddingLeft: '30px' }} type="number" step="0.01" min="0" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+                </div>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '13px', color: theme.textMuted, marginBottom: '8px' }}>Description</label>
+                <input style={S.input} type="text" placeholder="e.g. Netflix Subscription" value={description} onChange={(e) => setDescription(e.target.value)} required />
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '13px', color: theme.textMuted, marginBottom: '8px' }}>Category</label>
+                <select style={{ ...S.input, backgroundColor: 'white' }} value={category} onChange={(e) => setCategory(e.target.value)} required>
+                  <option value="" disabled>Select a category</option>
+                  <option value="Income">Income (Salary, Deposit)</option>
+                  <option value="Housing">Housing & Rent</option>
+                  <option value="Food">Food & Groceries</option>
+                  <option value="Transport">Transport</option>
+                  <option value="Entertainment">Entertainment</option>
+                  <option value="Shopping">Shopping</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', gap: '12px', marginTop: '10px' }}>
+                <button type="button" onClick={closeModal} style={{ ...S.btnSecondary, flex: 1 }}>Cancel</button>
+                <button type="submit" style={{ ...S.btnPrimary, flex: 1 }}>{editingId ? 'Save Changes' : 'Add Transaction'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
