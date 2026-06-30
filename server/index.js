@@ -5,17 +5,20 @@ const multer = require('multer');
 const csv = require('csv-parser');
 const fs = require('fs');
 const bcrypt = require('bcrypt');
+const axios = require('axios');
+const { v4: uuidv4 } = require('uuid');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const { Configuration, PlaidApi, PlaidEnvironments } = require('plaid'); // Added Plaid
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
 
+// --- MIDDLEWARE ---
 app.use(cors({
   origin: ["http://localhost:5173", "https://budget-insights-beta.vercel.app"]
 }));
 app.use(express.json());
 
+// --- DATABASE CONFIGURATION ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:anirudh@localhost:5433/budget_insights',
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
@@ -26,24 +29,14 @@ const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
-// --- PLAID SETUP ---
-const plaidConfig = new Configuration({
-  basePath: PlaidEnvironments.sandbox,
-  baseOptions: {
-    headers: {
-      'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID,
-      'PLAID-SECRET': process.env.PLAID_SECRET,
-    },
-  },
-});
-const plaidClient = new PlaidApi(plaidConfig);
-
+// Helper: Fast Rule-Based Categorization (Saves AI costs)
 const categorize = (desc) => {
   if (!desc) return 'Other';
   const d = desc.toLowerCase();
   if (d.includes('netflix') || d.includes('amazon') || d.includes('spotify')) return 'Entertainment';
-  if (d.includes('grocery') || d.includes('walmart') || d.includes('food') || d.includes('target')) return 'Food';
-  if (d.includes('uber') || d.includes('gas') || d.includes('fuel')) return 'Transportation';
+  if (d.includes('grocery') || d.includes('walmart') || d.includes('food') || d.includes('target') || d.includes('swiggy') || d.includes('zomato')) return 'Food';
+  if (d.includes('uber') || d.includes('gas') || d.includes('fuel') || d.includes('ola')) return 'Transportation';
+  if (d.includes('salary') || d.includes('upi')) return 'Income';
   return 'Other';
 };
 
@@ -68,41 +61,128 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- PLAID ROUTES ---
-// 1. Generate Link Token for the Frontend
-app.post('/api/create_link_token', async (req, res) => {
+// --- SETU ACCOUNT AGGREGATOR (INDIA) ROUTES ---
+
+// 1. Create Consent Request (Triggered by Frontend Button)
+app.post('/api/setu/create_consent', async (req, res) => {
+  const { userPhoneNumber } = req.body;
+  
+  const payload = {
+    Detail: {
+      consentStart: new Date().toISOString(),
+      consentExpiry: new Date(new Date().setMonth(new Date().getMonth() + 1)).toISOString(), // Expires in 1 month
+      Customer: { id: `${userPhoneNumber}@setu-aa` },
+      FIDataRange: {
+        from: new Date(new Date().setMonth(new Date().getMonth() - 6)).toISOString(), // Fetch last 6 months
+        to: new Date().toISOString()
+      },
+      DataLife: { unit: "MONTH", value: 6 },
+      DataConsumer: { type: "FIU" },
+      Purpose: {
+        code: "101",
+        refUri: "https://api.rebit.org.in/message/ref/item/101",
+        text: "Expense Tracking and Categorization"
+      },
+      fiTypes: ["DEPOSIT"] // Requesting Bank Account Statements
+    }
+  };
+
   try {
-    const response = await plaidClient.linkTokenCreate({
-      user: { client_user_id: 'client-id-temp' },
-      client_name: 'Budget Insights',
-      products: ['transactions'],
-      country_codes: ['US'],
-      language: 'en',
+    const response = await axios.post('https://fiu-sandbox.setu.co/consents', payload, {
+      headers: {
+        'x-client-id': process.env.SETU_CLIENT_ID,
+        'x-client-secret': process.env.SETU_CLIENT_SECRET,
+        'x-product-instance-id': process.env.SETU_PRODUCT_INSTANCE_ID
+      }
     });
-    res.json(response.data);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to create link token" });
-  }
-});
-
-// 2. Exchange Public Token and Save Access Token
-app.post('/api/exchange_public_token', async (req, res) => {
-  const { public_token, userId } = req.body;
-  try {
-    const response = await plaidClient.itemPublicTokenExchange({ public_token });
-    const accessToken = response.data.access_token;
     
-    // Save to database securely
-    await pool.query("UPDATE users SET plaid_access_token = $1 WHERE id = $2", [accessToken, userId]);
-    res.json({ message: "Bank connected successfully!" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to exchange token" });
+    res.json({ url: response.data.url, consentId: response.data.ConsentHandle });
+  } catch (error) {
+    console.error("Setu Consent Error:", error.response?.data || error.message);
+    res.status(500).json({ error: "Failed to create Indian Bank consent request" });
   }
 });
 
-// --- AI CLASSIFICATION ROUTE ---
+// 2. Webhook Listener (Setu pings this when user approves on their phone)
+app.post('/api/setu/webhook', async (req, res) => {
+  const { type, data } = req.body;
+
+  // Acknowledge receipt immediately so Setu doesn't retry
+  res.status(200).send('OK');
+
+  if (type === 'CONSENT_STATUS_UPDATE' && data.status === 'ACTIVE') {
+    const consentId = data.ConsentHandle;
+    console.log(`Consent ${consentId} approved! Fetching data...`);
+    
+    // Trigger data fetch asynchronously 
+    initiateSetuDataFetch(consentId);
+  }
+});
+
+// 3. Data Fetch Logic (Pulls data & uses Gemini AI to categorize)
+const initiateSetuDataFetch = async (consentId) => {
+  try {
+    // A. Request Data Session
+    const sessionRes = await axios.post('https://fiu-sandbox.setu.co/sessions', {
+      consentId: consentId,
+      DataRange: {
+        from: new Date(new Date().setMonth(new Date().getMonth() - 6)).toISOString(),
+        to: new Date().toISOString()
+      },
+      format: "JSON"
+    }, {
+      headers: {
+        'x-client-id': process.env.SETU_CLIENT_ID,
+        'x-client-secret': process.env.SETU_CLIENT_SECRET
+      }
+    });
+
+    const sessionId = sessionRes.data.id;
+    await delay(3000); // Wait for Setu to prepare the data packet
+
+    // B. Download the Data
+    const dataRes = await axios.get(`https://fiu-sandbox.setu.co/sessions/${sessionId}/data`, {
+      headers: {
+        'x-client-id': process.env.SETU_CLIENT_ID,
+        'x-client-secret': process.env.SETU_CLIENT_SECRET
+      }
+    });
+
+    const rawPayload = dataRes.data.Payload;
+    if (!rawPayload || rawPayload.length === 0) return;
+
+    // Note: We need a userId to save expenses. In a production app, you would map the 
+    // consentId to the userId in your database when the consent was created.
+    // For this boilerplate, we'll assume a generic fallback or require mapping.
+    
+    /* // C. Process through AI and save to DB
+      for (const account of rawPayload) {
+        for (const txn of account.data.transactions) {
+          const desc = txn.narration || "Unknown Transaction";
+          const amt = txn.amount || 0;
+          const date = txn.transactionTimestamp || new Date();
+          
+          let cat = categorize(desc);
+          if (cat === 'Other') {
+            await delay(1000); // Respect Gemini Limits
+            const prompt = `Classify "${desc}" into: Income, Housing, Food, Transportation, Entertainment, Shopping, Utilities, Other. Return ONLY the category name.`;
+            const aiResult = await model.generateContent(prompt);
+            cat = aiResult.response.text().trim();
+          }
+
+          // Save to PostgreSQL (Requires mapping consentId to userId)
+          // await pool.query("INSERT INTO expenses (amount, description, category, transaction_date, user_id) VALUES ($1, $2, $3, $4, $5)", [amt, desc, cat, date, mappedUserId]);
+        }
+      }
+    */
+    console.log("Data successfully fetched and ready for processing.");
+
+  } catch (error) {
+    console.error("Setu Data Fetch Error:", error.response?.data || error.message);
+  }
+};
+
+// --- SINGLE AI CLASSIFICATION ROUTE (Frontend Modal) ---
 app.post('/api/classify', async (req, res) => {
   const { description } = req.body;
   try {
@@ -114,7 +194,7 @@ app.post('/api/classify', async (req, res) => {
   }
 });
 
-// --- EXPENSE ROUTES ---
+// --- EXPENSE CRUD ROUTES ---
 app.get('/api/expenses', async (req, res) => {
   const { userId } = req.query;
   try {
@@ -159,15 +239,19 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     .on('end', async () => {
       try {
         for (const row of results) {
-          const amt = row.Amount || row.amount || 0;
+          const rawAmt = row.Amount || row.amount || 0;
           const desc = (row.Description || row.description || 'Unknown').trim();
           let cat = categorize(desc);
+          
           if (cat === 'Other') {
-            await delay(1000);
+            await delay(1000); // Respect Gemini Limits
             const prompt = `Classify "${desc}" into: Income, Housing, Food, Transportation, Entertainment, Shopping, Utilities, Other. Return ONLY the category name.`;
             const result = await model.generateContent(prompt);
             cat = result.response.text().trim();
           }
+
+          // Strip currency symbols and save
+          const amt = parseFloat(rawAmt.toString().replace(/[^0-9.-]+/g,""));
           await pool.query("INSERT INTO expenses (amount, description, category, transaction_date, user_id) VALUES ($1, $2, $3, CURRENT_DATE, $4)", [amt, desc, cat, userId]);
         }
         res.send('Bulk upload successful with AI classification!');
@@ -176,18 +260,13 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     });
 });
 
-// Database Setup
+// --- DATABASE SETUP ---
 const setupDatabase = async () => {
-  // Creating tables if they don't exist
   await pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL);`);
   
-  // Adding the Plaid access token column safely (in case the table already exists)
-  try {
-    await pool.query(`ALTER TABLE users ADD COLUMN plaid_access_token VARCHAR(255);`);
-  } catch (err) {
-    // Column already exists, safe to ignore
-  }
-
+  // Add columns for India's Account Aggregator context (Safe to run multiple times)
+  try { await pool.query(`ALTER TABLE users ADD COLUMN setu_consent_id VARCHAR(255);`); } catch (err) {}
+  
   await pool.query(`CREATE TABLE IF NOT EXISTS expenses (id SERIAL PRIMARY KEY, amount DECIMAL(10,2) NOT NULL, description VARCHAR(255) NOT NULL, category VARCHAR(50), transaction_date DATE, user_id INTEGER REFERENCES users(id));`);
 };
 
