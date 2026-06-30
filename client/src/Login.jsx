@@ -2,6 +2,9 @@ import { useState } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import toast, { Toaster } from 'react-hot-toast';
+const API_URL = "https://budget-backend-ebjy.onrender.com";
+// Then use it like this:
+await axios.get(`${API_URL}/api/expenses?userId=${userId}`);
 
 export default function Login() {
   const [isLogin, setIsLogin] = useState(true);

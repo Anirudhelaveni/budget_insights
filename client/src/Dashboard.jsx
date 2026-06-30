@@ -3,6 +3,9 @@ import axios from 'axios';
 import { PieChart, Pie, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import toast, { Toaster } from 'react-hot-toast';
+const API_URL = "https://budget-backend-ebjy.onrender.com";
+// Then use it like this:
+await axios.get(`${API_URL}/api/expenses?userId=${userId}`);
 
 export default function Dashboard() {
   const [expenses, setExpenses] = useState([]);
